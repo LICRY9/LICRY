@@ -1,0 +1,13 @@
+{
+  "name": "上岸计划",
+  "short_name": "上岸计划",
+  "description": "考研任务规划：长期任务每天自动出现，单次任务可提前安排",
+  "start_url": "index.html",
+  "display": "standalone",
+  "background_color": "#F4F3EF",
+  "theme_color": "#2F5B4E",
+  "lang": "zh-CN",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">上岸计划</string>
+    <string name="title_activity_main">上岸计划</string>
+    <string name="package_name">com.shangan.planner</string>
+    <string name="custom_url_scheme">com.shangan.planner</string>
+</resources>

@@ -6,6 +6,8 @@
 const KEY = 'shangan.planner.v1';
 const DEFAULT_EXAM = '2027-12-18';
 const WD_CN = ['日', '一', '二', '三', '四', '五', '六'];
+const DEFAULT_SUBJECTS = ['政治', '英语', '数学', '专业课'];
+const SUBJ_COLORS = ['#2E4A38', '#C08F35', '#6E8265', '#A8763E', '#3F5F4A'];
 
 /* ---------- 工具函数 ---------- */
 const pad = n => String(n).padStart(2, '0');
@@ -37,6 +39,8 @@ function fullLabel(iso) {
 let state, calYear, calMonth;   // 日历游标
 let draft = { kind: 'once', date: todayISO() };
 let currentMenuId = null;       // 菜单当前指向的任务
+let statsRange = 'week';        // 各科统计区间
+let manualSid = null;           // 补录选中的科目
 state = loadState();
 
 function seedTasks() {
@@ -65,8 +69,30 @@ function normalize(s) {
     return Object.assign(base, { date: t.date || todayISO(), done: !!t.done, doneAt: t.doneAt || null });
   });
   if (!/^\d{4}-\d{2}-\d{2}$/.test(out.examDate || '')) out.examDate = DEFAULT_EXAM;
+
+  if (Array.isArray(out.subjects)) {
+    out.subjects = out.subjects.filter(x => x && x.name).map(x => ({ id: x.id || uid(), name: String(x.name).slice(0, 8) }));
+  } else {
+    out.subjects = DEFAULT_SUBJECTS.map(n => ({ id: uid(), name: n }));
+  }
+
+  out.sessions = Array.isArray(out.sessions)
+    ? out.sessions.filter(x => x && x.sec > 0 && x.start).map(x => ({
+        id: x.id || uid(),
+        sid: x.sid || '',
+        sname: x.sname || '',
+        start: x.start,
+        sec: Math.round(x.sec),
+        manual: !!x.manual
+      }))
+    : [];
+
+  out.running = (out.running && out.running.sid && out.running.start)
+    ? { sid: out.running.sid, start: out.running.start }
+    : null;
+
   out.viewDate = todayISO();
-  if (!['today', 'plan', 'long'].includes(out.tab)) out.tab = 'today';
+  if (!['today', 'plan', 'long', 'stats'].includes(out.tab)) out.tab = 'today';
   return out;
 }
 
@@ -124,12 +150,13 @@ function render() {
   const view = $('view');
   if (state.tab === 'today') view.innerHTML = todayView();
   else if (state.tab === 'plan') view.innerHTML = planView();
+  else if (state.tab === 'stats') view.innerHTML = statsView();
   else view.innerHTML = longView();
 
   document.querySelectorAll('.tab').forEach(el => {
     el.classList.toggle('active', el.dataset.tab === state.tab);
   });
-  $('fab').classList.toggle('hide', state.tab === 'long');
+  $('fab').classList.toggle('hide', state.tab === 'long' || state.tab === 'stats');
 
   const d = fromISO(todayISO());
   $('topbarDate').textContent = `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 周${WD_CN[d.getDay()]}`;
@@ -194,6 +221,8 @@ function todayView() {
       </div>
       <div class="bar"><i style="width:${pct}%"></i></div>
     </div>
+
+    ${timerCard()}
 
     <div class="weekstrip">${week}</div>
     ${banner}
@@ -364,6 +393,279 @@ function longView() {
   </div>`;
 }
 
+/* ---------- 学习计时 ---------- */
+function sessionDay(s) { return toISO(new Date(s.start)); }
+
+function fmtMin(sec) {
+  if (!sec || sec < 30) return '0 分钟';
+  const m = Math.round(sec / 60);
+  if (m < 60) return m + ' 分钟';
+  const h = Math.floor(m / 60), r = m % 60;
+  return r ? `${h} 小时 ${r} 分` : `${h} 小时`;
+}
+
+function fmtClock(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60), s = sec % 60;
+  return (h ? h + ':' : '') + pad(m) + ':' + pad(s);
+}
+
+function timerCard() {
+  const subjects = state.subjects;
+  const todaySec = state.sessions.filter(s => sessionDay(s) === todayISO()).reduce((a, s) => a + s.sec, 0);
+
+  if (!subjects.length) {
+    return `<div class="card timer">
+      <div class="timer-head"><span class="timer-label">学习计时</span></div>
+      <p class="timer-hint">还没有科目，去「数据」页底部添加</p>
+    </div>`;
+  }
+
+  const run = state.running;
+  const cur = run ? subjects.find(s => s.id === run.sid) : null;
+  const elapsed = run ? Math.floor((Date.now() - run.start) / 1000) : 0;
+
+  const chips = subjects.map(s =>
+    `<button class="chip-sub ${run && run.sid === s.id ? 'on' : ''}" data-act="startTimer" data-id="${s.id}">${esc(s.name)}</button>`
+  ).join('');
+
+  return `<div class="card timer ${run ? 'running' : ''}">
+    <div class="timer-head">
+      <span class="timer-label">${run ? '<span class="live-dot"></span>正在学习' : '学习计时'}</span>
+      <span class="timer-today">今天 ${fmtMin(todaySec)}</span>
+    </div>
+    ${run ? `<div class="run-row">
+      <div>
+        <span class="run-sub">${esc(cur ? cur.name : '其他')}</span>
+        <span class="run-clock" id="timerClock">${fmtClock(elapsed)}</span>
+      </div>
+      <button class="btn-stop" data-act="stopTimer">结束</button>
+    </div>` : ''}
+    <div class="sub-chips">${chips}</div>
+    ${run || todaySec ? '' : '<p class="timer-hint">选一科开始计时，结束后自动记入数据</p>'}
+  </div>`;
+}
+function startTimer(sid) {
+  if (state.running) flushRunning();
+  state.running = { sid, start: Date.now() };
+  save(); render();
+}
+
+function flushRunning() {
+  if (!state.running) return 0;
+  const sec = Math.round((Date.now() - state.running.start) / 1000);
+  const s = state.subjects.find(x => x.id === state.running.sid);
+  if (sec >= 30) {
+    state.sessions.push({
+      id: uid(),
+      sid: state.running.sid,
+      sname: s ? s.name : '其他',
+      start: state.running.start,
+      sec
+    });
+  }
+  state.running = null;
+  return sec;
+}
+
+function stopTimer() {
+  if (!state.running) return;
+  const s = state.subjects.find(x => x.id === state.running.sid);
+  const sec = flushRunning();
+  save(); render();
+  if (sec >= 30) toast(`${s ? s.name : '学习'} · ${fmtMin(sec)} 已记录`);
+  else toast('不足 30 秒，没有记录');
+}
+
+/* ---------- 数据一览 ---------- */
+function secByDay() {
+  const m = {};
+  state.sessions.forEach(s => { const d = sessionDay(s); m[d] = (m[d] || 0) + s.sec; });
+  return m;
+}
+function weekStartISO() {
+  const dow = (new Date().getDay() + 6) % 7;
+  return addDays(todayISO(), -dow);
+}
+function sumRange(map, from, to) {
+  let t = 0, cur = from, guard = 0;
+  while (cur <= to && guard++ < 800) { t += map[cur] || 0; cur = addDays(cur, 1); }
+  return t;
+}
+function subjSec(sid, from, to) {
+  return state.sessions
+    .filter(s => s.sid === sid && sessionDay(s) >= from && sessionDay(s) <= to)
+    .reduce((a, s) => a + s.sec, 0);
+}
+function weekTaskStats() {
+  const today = todayISO();
+  const dow = (new Date().getDay() + 6) % 7;
+  const ws = addDays(today, -dow);
+  let checks = 0, expected = 0;
+  dailyActive().forEach(t => {
+    for (let i = 0; i <= dow; i++) {
+      const d = addDays(ws, i);
+      if (d < t.createdAt) continue;
+      expected++;
+      if (t.doneDates.includes(d)) checks++;
+    }
+  });
+  const onceDone = state.tasks.filter(t => t.kind === 'once' && t.done && t.doneAt && t.doneAt >= ws && t.doneAt <= today).length;
+  return { checks, expected, onceDone };
+}
+
+function statsView() {
+  const today = todayISO();
+  const ws = weekStartISO();
+  const byDay = secByDay();
+  const todaySec = byDay[today] || 0;
+  const weekSec = sumRange(byDay, ws, today);
+  const lastWeekSec = sumRange(byDay, addDays(ws, -7), addDays(ws, -1));
+  const totalSec = state.sessions.reduce((a, s) => a + s.sec, 0);
+  const avgSec = state.sessions.length ? Math.round(totalSec / state.sessions.length) : 0;
+
+  let streak = 0, cur = byDay[today] ? today : addDays(today, -1);
+  while (byDay[cur] && streak < 900) { streak++; cur = addDays(cur, -1); }
+
+  const diff = weekSec - lastWeekSec;
+  let hh = Math.floor(weekSec / 3600);
+  let mm = Math.round((weekSec % 3600) / 60);
+  if (mm === 60) { hh++; mm = 0; }
+
+  /* 各科 */
+  const from = statsRange === 'day' ? today : (statsRange === 'week' ? ws : '0000-00-00');
+  const vals = state.subjects.map(s => subjSec(s.id, from, today));
+  const maxSub = Math.max(1, ...vals);
+  const rangeLabel = statsRange === 'day' ? '今日' : (statsRange === 'week' ? '本周' : '累计');
+
+  const subjRows = state.subjects.map((s, i) => {
+    const v = vals[i];
+    const color = SUBJ_COLORS[i % SUBJ_COLORS.length];
+    return `<div class="subj-row">
+      <span class="subj-dot" style="background:${color}"></span>
+      <span class="subj-name">${esc(s.name)}</span>
+      <div class="subj-bar"><i style="width:${Math.round(v / maxSub * 100)}%;background:${color}"></i></div>
+      <span class="subj-time">${fmtMin(v)}</span>
+    </div>`;
+  }).join('');
+
+  /* 最近 14 天 */
+  const days = [];
+  for (let i = 13; i >= 0; i--) days.push(addDays(today, -i));
+  const dvals = days.map(d => byDay[d] || 0);
+  const dmax = Math.max(1, ...dvals);
+  const bars = days.map((d, i) => {
+    const v = dvals[i];
+    const hpx = v ? Math.max(3, Math.round(v / dmax * 84)) : 2;
+    const cls = v ? (d === today ? 'today' : '') : 'zero';
+    return `<i class="${cls}" style="height:${hpx}px"></i>`;
+  }).join('');
+  const labels = days.map(d => `<span>${fromISO(d).getDate()}</span>`).join('');
+
+  /* 学习时段 */
+  const buckets = [
+    { n: '清晨', test: h => h >= 5 && h < 9 },
+    { n: '上午', test: h => h >= 9 && h < 12 },
+    { n: '下午', test: h => h >= 12 && h < 18 },
+    { n: '晚上', test: h => h >= 18 && h < 23 },
+    { n: '深夜', test: h => h >= 23 || h < 5 }
+  ];
+  const bsec = buckets.map(b => state.sessions
+    .filter(s => b.test(new Date(s.start).getHours()))
+    .reduce((a, s) => a + s.sec, 0));
+  const bmax = Math.max(1, ...bsec);
+  const habitRows = buckets.map((b, i) => `<div class="habit-row">
+    <span class="habit-name">${b.n}</span>
+    <div class="habit-bar"><i style="width:${Math.round(bsec[i] / bmax * 100)}%"></i></div>
+    <span class="habit-time">${fmtMin(bsec[i])}</span>
+  </div>`).join('');
+
+  /* 科目间隔 */
+  const gaps = state.subjects.map(s => {
+    const last = state.sessions.filter(x => x.sid === s.id).reduce((a, x) => x.start > a ? x.start : a, 0);
+    if (!last) return `<span class="gap-chip">${esc(s.name)} 未开始</span>`;
+    const d = diffDays(today, toISO(new Date(last)));
+    const txt = d === 0 ? '今天' : (d === 1 ? '昨天' : d + ' 天前');
+    return `<span class="gap-chip ${d >= 3 ? 'warn' : ''}">${esc(s.name)} ${txt}</span>`;
+  }).join('');
+
+  const ts = weekTaskStats();
+  const rate = ts.expected ? Math.round(ts.checks / ts.expected * 100) : 0;
+
+  return `
+  <div class="fade-in">
+    <div class="hero">
+      <div class="hero-label">本周学习时长</div>
+      <div class="hero-num">${hh}<small>小时</small>${mm}<small>分</small></div>
+      <div class="hero-sub">今天 ${fmtMin(todaySec)} · 累计 ${fmtMin(totalSec)}</div>
+      <div class="hero-foot">
+        <span>连续学习 ${streak} 天</span>
+        <span>${diff >= 0 ? '比上周多' : '比上周少'} ${fmtMin(Math.abs(diff))}</span>
+        ${avgSec ? `<span>平均每次 ${fmtMin(avgSec)}</span>` : ''}
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head">
+        <h3>各科时间</h3><span class="line"></span>
+        <div class="seg-sm">
+          <button class="${statsRange === 'day' ? 'on' : ''}" data-act="range" data-range="day">今日</button>
+          <button class="${statsRange === 'week' ? 'on' : ''}" data-act="range" data-range="week">本周</button>
+          <button class="${statsRange === 'all' ? 'on' : ''}" data-act="range" data-range="all">累计</button>
+        </div>
+      </div>
+      <div class="card subj-card">
+        ${state.subjects.length ? subjRows : '<p class="timer-hint" style="margin:12px 0">还没有科目</p>'}
+      </div>
+      <div style="display:flex;justify-content:flex-end;margin-top:6px">
+        <button class="link" data-act="manual">忘了计时？补录一条</button>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="card chart-card">
+        <div class="chart-head">
+          <span class="chart-title">最近 14 天</span>
+          <span class="chart-max">最长的一天 ${fmtMin(dmax)}</span>
+        </div>
+        <div class="chart-bars">${bars}</div>
+        <div class="chart-labels">${labels}</div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head"><h3>学习时段</h3><span class="line"></span></div>
+      <div class="card habit-card">${habitRows}</div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head"><h3>科目间隔</h3><span class="line"></span></div>
+      <div class="gaps">${gaps}</div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head"><h3>本周任务</h3><span class="line"></span></div>
+      <div class="card num-grid">
+        <div class="num-item"><b>${ts.checks}</b><span>长期任务打卡</span></div>
+        <div class="num-item"><b>${rate}%</b><span>打卡完成率</span></div>
+        <div class="num-item"><b>${ts.onceDone}</b><span>完成单次任务</span></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-head"><h3>设置</h3><span class="line"></span></div>
+      <div class="list">
+        <div class="task" data-act="subjects">
+          <div class="t-body">
+            <p class="t-title" style="color:var(--ink-2)">管理科目</p>
+            <span class="t-meta">目前的科目：${state.subjects.map(s => esc(s.name)).join('、') || '无'}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="hint">只在点「结束」时记录时长，中途退出应用不会丢，回来会接着计时。</p>
+  </div>`;
+}
+
 /* ---------- 弹层 ---------- */
 function openSheet(html) {
   const s = $('sheet');
@@ -458,8 +760,46 @@ function openTaskMenu(id) {
   `);
 }
 
+function openSubjects() {
+  openSheet(`
+    <div class="sheet-head">科目</div>
+    ${state.subjects.length
+      ? state.subjects.map(s => `<div class="menu-row"><span>${esc(s.name)}</span><button data-delsub="${s.id}">删除</button></div>`).join('')
+      : '<p class="sheet-sub">还没有科目，先在下面添加一个</p>'}
+    <input class="field" id="newSubject" placeholder="新科目，例如 专业课二" maxlength="8" style="margin-top:16px" autocomplete="off" />
+    <div class="sheet-actions">
+      <button class="btn btn-ghost" data-close>关闭</button>
+      <button class="btn btn-primary" id="addSubject">添加</button>
+    </div>
+    <p class="hint">删除科目不会删除历史学习记录。</p>
+  `);
+}
+
+function openManual() {
+  if (!state.subjects.length) { toast('先添加一个科目'); openSubjects(); return; }
+  manualSid = state.subjects[0].id;
+  openSheet(`
+    <div class="sheet-head">补录学习时长</div>
+    <p class="sheet-sub">忘了按「开始」时，手动补一条记录。</p>
+    <div class="sub-chips" id="msChips">
+      ${state.subjects.map((s, i) => `<button class="chip-sub ${i === 0 ? 'on' : ''}" data-ms="${s.id}">${esc(s.name)}</button>`).join('')}
+    </div>
+    <input class="field" id="msMin" type="number" inputmode="numeric" min="1" max="600" placeholder="时长（分钟），例如 45" style="margin-top:14px" />
+    <input class="field" id="msDate" type="date" value="${todayISO()}" style="margin-top:10px" />
+    <div class="sheet-actions">
+      <button class="btn btn-ghost" data-close>取消</button>
+      <button class="btn btn-primary" id="saveManual">保存</button>
+    </div>
+  `);
+  setTimeout(() => { const i = $('msMin'); if (i) i.focus(); }, 340);
+}
+
 /* ---------- 事件 ---------- */
 document.addEventListener('DOMContentLoaded', () => {
+  if (state.running) {
+    const el = Math.round((Date.now() - state.running.start) / 1000);
+    if (el > 36000) { state.running = null; save(); }
+  }
   render();
 
   $('tabbar').addEventListener('click', e => {
@@ -477,6 +817,12 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   $('fab').addEventListener('click', () => openAdd(state.viewDate, 'once'));
+
+  setInterval(() => {
+    const el = $('timerClock');
+    if (!el || !state.running) return;
+    el.textContent = fmtClock(Math.floor((Date.now() - state.running.start) / 1000));
+  }, 1000);
 
   $('view').addEventListener('click', e => {
     const el = e.target.closest('[data-act]');
@@ -506,6 +852,11 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (act === 'addHere') { openAdd(state.viewDate, 'once'); return; }
     if (act === 'backToday') { state.viewDate = todayISO(); save(); render(); return; }
+    if (act === 'startTimer') { startTimer(el.dataset.id); return; }
+    if (act === 'stopTimer') { stopTimer(); return; }
+    if (act === 'range') { statsRange = el.dataset.range; render(); return; }
+    if (act === 'manual') { openManual(); return; }
+    if (act === 'subjects') { openSubjects(); return; }
     if (act === 'addLong') { openAdd(todayISO(), 'daily'); return; }
     if (act === 'exam') {
       openSheet(`
@@ -600,6 +951,47 @@ document.addEventListener('DOMContentLoaded', () => {
         state = normalize(Object.assign({ tab: state.tab }, obj));
         save(); closeSheet(); render(); toast('已恢复');
       } catch (err) { toast('数据格式不对，请检查是否完整复制'); }
+      return;
+    }
+
+    const ms = e.target.closest('[data-ms]');
+    if (ms) {
+      manualSid = ms.dataset.ms;
+      document.querySelectorAll('[data-ms]').forEach(b => b.classList.toggle('on', b.dataset.ms === manualSid));
+      return;
+    }
+
+    if (e.target.closest('#saveManual')) {
+      const min = parseInt($('msMin').value, 10);
+      const dt = $('msDate').value || todayISO();
+      if (!min || min < 1 || min > 600) { toast('填 1 到 600 之间的分钟数'); return; }
+      const s = state.subjects.find(x => x.id === manualSid);
+      const base = fromISO(dt);
+      base.setHours(12, 0, 0, 0);
+      state.sessions.push({
+        id: uid(), sid: manualSid, sname: s ? s.name : '其他',
+        start: base.getTime(), sec: min * 60, manual: true
+      });
+      save(); closeSheet(); render(); toast(`已补录 ${fmtMin(min * 60)}`);
+      return;
+    }
+
+    if (e.target.closest('#addSubject')) {
+      const v = ($('newSubject').value || '').trim().slice(0, 8);
+      if (!v) { toast('写个科目名'); return; }
+      if (state.subjects.some(s => s.name === v)) { toast('已经有这个科目了'); return; }
+      state.subjects.push({ id: uid(), name: v });
+      save(); render(); openSubjects(); toast('已添加');
+      return;
+    }
+
+    const ds = e.target.closest('[data-delsub]');
+    if (ds) {
+      const id = ds.dataset.delsub;
+      if (state.subjects.length <= 1) { toast('至少保留一个科目'); return; }
+      if (state.running && state.running.sid === id) flushRunning();
+      state.subjects = state.subjects.filter(s => s.id !== id);
+      save(); render(); openSubjects(); toast('已删除，历史记录保留');
       return;
     }
 
